@@ -1,0 +1,104 @@
+---
+- name: Import the database from an S3 link
+  hosts: all
+  vars:
+    databaseuser: "{{ databaseuser }}"
+    databasepassword: "{{ databasepassword }}"
+    new_database_name: "international_db_{{ year }}{{ month }}{{ day }}_{{ hour }}{{ minute }}"
+    dir_path: "/tmp/arvea-web"
+    specific_tables: []
+  collections:
+    - community.mysql
+  tasks:
+    - name: Create the database {{ new_database_name }} 
+      command: >
+        mysql --user="{{ databaseuser }}" --password="{{ databasepassword }}"
+        -e "CREATE DATABASE IF NOT EXISTS {{ new_database_name }};"
+      register: create_db_result
+      failed_when: create_db_result.rc != 0
+
+    - name: Define dynamic variables if they are not provided
+      set_fact:
+        year: "{{ year | default(ansible_date_time.year) }}"
+        month: "{{ month | default(ansible_date_time.month) }}"
+        day: "{{ day | default(ansible_date_time.day) }}"
+        hour: "{{ hour | default(ansible_date_time.hour) }}"
+        minute: "{{ minute | default(ansible_date_time.minute) }}"
+
+    - name: Build the S3 path
+      set_fact:
+        s3_key: "{{ year }}/{{ month }}/{{ day }}/{{ hour }}/{{ minute }}/arvea_backup_{{ year }}{{ month }}{{ day }}{{ hour }}{{ minute }}.tar.gz"
+
+    - name: Download the backup from S3
+      shell: "aws s3 cp s3://backupsecondaryinternational/{{ s3_key }} /tmp/arvea_backup.tar.gz"
+ 
+    - name: Create the directory /tmp/arvea-eshop
+      file:
+        path: "/tmp/arvea-web"
+        state: directory
+        mode: '0755'
+        owner: debian
+        group: debian  
+
+    - name: Extract the backup
+      unarchive:
+        src: "/tmp/arvea_backup.tar.gz"
+        dest: "/tmp/arvea-web"
+        remote_src: yes
+        extra_opts: ["--strip-components=1"]
+
+    - name: Recursively apply owner, group, and permissions to /tmp/arvea-eshop
+      file:
+        path: "/tmp/arvea-web"
+        state: directory
+        mode: '0755'
+        owner: debian
+        group: debian
+        recurse: yes
+
+    - name: Delete the identified files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ fichiers_views.files }}"
+    - name: Build the list of files to retain
+      set_fact:
+        keep_files: >-
+          {{
+            specific_tables | map('regex_replace', '^(.*)$', 'arvea.\1.00000.sql') |
+            list + specific_tables | map('regex_replace', '^(.*)$', 'arvea.\1-schema.sql') |
+            list
+          }}
+
+    - name: Find all files matching arvea.*.sql
+      find:
+        paths: /tmp/arvea-web
+        patterns: "arvea.*.sql"
+      register: found_files
+
+    - name: Delete unprotected files
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ found_files.files }}"
+      when: item.path | basename not in keep_files
+
+    - name: Display the retained files
+      debug:
+        msg: "Fichiers conservés : {{ keep_files }}"
+
+    - name: Import database using myloader
+      command: >
+        myloader --directory /tmp/arvea-web --database {{ new_database_name }} --user {{ databaseuser }} --password {{ databasepassword }} --overwrite-tables
+      register: import_result
+      failed_when: import_result.rc != 0
+
+    - name: Remove temporary files after the import
+      file:
+        path: /tmp/arvea-web
+        state: absent
+
+    - name: Delete the backup file
+      file:
+        path: /tmp/arvea_backup.tar.gz
+        state: absent

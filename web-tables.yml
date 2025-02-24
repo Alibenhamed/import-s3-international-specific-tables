@@ -56,11 +56,6 @@
         group: debian
         recurse: yes
 
-    - name: Delete the identified files
-      ansible.builtin.file:
-        path: "{{ item.path }}"
-        state: absent
-      loop: "{{ fichiers_views.files }}"
     - name: Build the list of files to retain
       set_fact:
         keep_files: >-
